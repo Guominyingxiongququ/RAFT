@@ -4,9 +4,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from update import BasicUpdateBlock, SmallUpdateBlock
-from extractor import BasicEncoder, SmallEncoder
+from extractor import BasicEncoder, SmallEncoder, ResidualBlocksWithInputConv
 from corr import CorrBlock, AlternateCorrBlock
 from utils.utils import bilinear_sampler, coords_grid, upflow8
+from utils.flow_warp import flow_warp
+from residual_block import *
+from upsample import PixelShufflePack
 
 try:
     autocast = torch.cuda.amp.autocast
@@ -25,7 +28,7 @@ class RAFT(nn.Module):
     def __init__(self, args):
         super(RAFT, self).__init__()
         self.args = args
-
+        # add number_blocks_reconstruction to args
         if args.small:
             self.hidden_dim = hdim = 96
             self.context_dim = cdim = 64
@@ -45,15 +48,36 @@ class RAFT(nn.Module):
             self.args.alternate_corr = False
 
         # feature network, context network, and update block
-        if args.small:
-            self.fnet = SmallEncoder(output_dim=128, norm_fn='instance', dropout=args.dropout)        
-            self.cnet = SmallEncoder(output_dim=hdim+cdim, norm_fn='none', dropout=args.dropout)
-            self.update_block = SmallUpdateBlock(self.args, hidden_dim=hdim)
-
-        else:
-            self.fnet = BasicEncoder(output_dim=256, norm_fn='instance', dropout=args.dropout)        
-            self.cnet = BasicEncoder(output_dim=hdim+cdim, norm_fn='batch', dropout=args.dropout)
-            self.update_block = BasicUpdateBlock(self.args, hidden_dim=hdim)
+        self.fnet = ResidualBlocksWithInputConv(3, 128, 5)
+        self.cnet = ResidualBlocksWithInputConv(3, hdim+cdim, 5)
+        self.update_block = BasicUpdateBlock(self.args, hidden_dim=hdim)
+        # if args.small:
+        #     self.fnet = SmallEncoder(output_dim=128, norm_fn='instance', dropout=args.dropout)        
+        #     self.cnet = SmallEncoder(output_dim=hdim+cdim, norm_fn='none', dropout=args.dropout)
+        #     self.update_block = SmallUpdateBlock(self.args, hidden_dim=hdim)
+        # else:
+        #     self.fnet = BasicEncoder(output_dim=256, norm_fn='instance', dropout=args.dropout)        
+        #     self.cnet = BasicEncoder(output_dim=hdim+cdim, norm_fn='batch', dropout=args.dropout)
+        #     self.update_block = BasicUpdateBlock(self.args, hidden_dim=hdim)
+        
+        # reconstruction
+        self.conv_first = nn.Conv2d(2 * 3, hdim, 3, 1, 1)
+        self.reconstruction = make_layer(
+            ResidualBlockNoBN,
+            5,
+            mid_channels=hdim)
+        # upsample
+        self.upsample1 = PixelShufflePack(
+            hdim, hdim, 2, upsample_kernel=3)
+        self.upsample2 = PixelShufflePack(
+            hdim, 64, 2, upsample_kernel=3)
+        # we fix the output channels in the last few layers to 64.
+        self.conv_hr = nn.Conv2d(64, 64, 3, 1, 1)
+        self.conv_last = nn.Conv2d(64, 3, 3, 1, 1)
+        self.img_upsample = nn.Upsample(
+            scale_factor=4, mode='bilinear', align_corners=False)
+        # activation function
+        self.lrelu = nn.LeakyReLU(negative_slope=0.1, inplace=True)
 
     def freeze_bn(self):
         for m in self.modules():
@@ -63,8 +87,8 @@ class RAFT(nn.Module):
     def initialize_flow(self, img):
         """ Flow is represented as difference between two coordinate grids flow = coords1 - coords0"""
         N, C, H, W = img.shape
-        coords0 = coords_grid(N, H//8, W//8, device=img.device)
-        coords1 = coords_grid(N, H//8, W//8, device=img.device)
+        coords0 = coords_grid(N, H, W, device=img.device)
+        coords1 = coords_grid(N, H, W, device=img.device)
 
         # optical flow computed as difference: flow = coords1 - coords0
         return coords0, coords1
@@ -86,18 +110,20 @@ class RAFT(nn.Module):
     def forward(self, image1, image2, iters=12, flow_init=None, upsample=True, test_mode=False):
         """ Estimate optical flow between pair of frames """
 
-        image1 = 2 * (image1 / 255.0) - 1.0
-        image2 = 2 * (image2 / 255.0) - 1.0
+        # image1 = 2 * (image1 / 255.0) - 1.0
+        # image2 = 2 * (image2 / 255.0) - 1.0
 
         image1 = image1.contiguous()
         image2 = image2.contiguous()
 
         hdim = self.hidden_dim
+
         cdim = self.context_dim
 
         # run the feature network
         with autocast(enabled=self.args.mixed_precision):
-            fmap1, fmap2 = self.fnet([image1, image2])        
+            fmap1 = self.fnet(image1)
+            fmap2 = self.fnet(image2)
         
         fmap1 = fmap1.float()
         fmap2 = fmap2.float()
@@ -118,7 +144,7 @@ class RAFT(nn.Module):
         if flow_init is not None:
             coords1 = coords1 + flow_init
 
-        flow_predictions = []
+        output_predictions = []
         for itr in range(iters):
             coords1 = coords1.detach()
             corr = corr_fn(coords1) # index correlation volume
@@ -131,14 +157,25 @@ class RAFT(nn.Module):
             coords1 = coords1 + delta_flow
 
             # upsample predictions
-            if up_mask is None:
-                flow_up = upflow8(coords1 - coords0)
-            else:
-                flow_up = self.upsample_flow(coords1 - coords0, up_mask)
-            
-            flow_predictions.append(flow_up)
+            # if up_mask is None:
+            #     flow_up = upflow8(coords1 - coords0)
+            # else:
+            #     flow_up = self.upsample_flow(coords1 - coords0, up_mask)
+            flow = coords1 - coords0
+            image_warp2 = flow_warp(image2, flow.permute(0, 2, 3, 1))
+            # reconstruction
+            hr = torch.cat((image1, image_warp2), dim=1)
+            hr = self.conv_first(hr)
+            hr = self.reconstruction(hr)
+            hr = self.lrelu(self.upsample1(hr))
+            hr = self.lrelu(self.upsample2(hr))
+            hr = self.lrelu(self.conv_hr(hr))
+            hr = self.conv_last(hr)
+            base = self.img_upsample(image1)
+            hr += base
+            output_predictions.append(hr)
 
         if test_mode:
-            return coords1 - coords0, flow_up
+            return coords1 - coords0, flow
             
-        return flow_predictions
+        return output_predictions

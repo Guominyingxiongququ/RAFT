@@ -37,11 +37,9 @@ class CorrBlock:
             dx = torch.linspace(-r, r, 2*r+1, device=coords.device)
             dy = torch.linspace(-r, r, 2*r+1, device=coords.device)
             delta = torch.stack(torch.meshgrid(dy, dx), axis=-1)
-
             centroid_lvl = coords.reshape(batch*h1*w1, 1, 1, 2) / 2**i
             delta_lvl = delta.view(1, 2*r+1, 2*r+1, 2)
             coords_lvl = centroid_lvl + delta_lvl
-
             corr = bilinear_sampler(corr, coords_lvl)
             corr = corr.view(batch, h1, w1, -1)
             out_pyramid.append(corr)
