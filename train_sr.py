@@ -13,10 +13,11 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+import torchvision
 
 from torch.utils.data import DataLoader
 from raft import RAFT
-import evaluate
+from evaluate import *
 import datasets
 
 from builder import build_dataloader, build_dataset
@@ -73,11 +74,6 @@ def sequence_loss(pred_imgs, gt_img, gamma=0.8):
         i_loss = charbonnier_loss(pred_imgs[i], gt_img)
         total_loss += i_weight * (i_loss).mean()
 
-    # metrics = {
-    #     'PSNR': epe.mean().item(),
-    #     'SSIM':
-    # }
-
     return total_loss
 
 
@@ -112,7 +108,7 @@ class Logger:
         print(training_str + metrics_str)
 
         if self.writer is None:
-            self.writer = SummaryWriter()
+            self.writer = SummaryWriter("/home/xinyuanyu/work/RAFT_result")
 
         for k in self.running_loss:
             self.writer.add_scalar(k, self.running_loss[k]/SUM_FREQ, self.total_steps)
@@ -157,8 +153,6 @@ def train(args):
         model.module.freeze_bn()
     
     dataset = build_dataset(cfg.data.train)
-
-    # train_loader = datasets.fetch_dataloader(args)
     optimizer, scheduler = fetch_optimizer(args, model)
 
     total_steps = 0
@@ -169,6 +163,7 @@ def train(args):
     add_noise = True
 
     should_keep_training = True
+    loss_sum = 0
     while should_keep_training:
 
         for i_batch, data_blob in enumerate(dataset):
@@ -184,10 +179,11 @@ def train(args):
 
             image1 = image1[None, ...]
             image2 = image2[None, ...]
+            gt = gt[None, ...]
+            gt = gt.cuda()
             output_predictions = model(image1, image2, iters=args.iters)
 
-            loss= sequence_loss(output_predictions, args.gamma)
-            print("loss: " + str(loss)) 
+            loss= sequence_loss(output_predictions, gt, args.gamma) 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)                
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
@@ -195,27 +191,30 @@ def train(args):
             scaler.step(optimizer)
             scheduler.step()
             scaler.update()
-
+            logger.push({'loss':loss})
             # logger.push(metrics)
+            if total_steps % SUM_FREQ == SUM_FREQ - 1:
+                output = [img[0] for img in output_predictions]
+                grid = torchvision.utils.make_grid(output)
+                logger.writer.add_image('prediction_list', grid, total_steps)
+                grid = torchvision.utils.make_grid([image1[0], image2[0]])
+                logger.writer.add_image('input', grid, total_steps)
+                error_first = abs(output[0]-gt[0])
+                error_last = abs(output[-1]-gt[0])
+                max_val = torch.max(error_first)
+                error_first = error_first/max_val
+                error_last = error_last/max_val
+                grid = torchvision.utils.make_grid([gt[0], error_first, error_last])
+                logger.writer.add_image('error', grid, total_steps)
 
             if total_steps % VAL_FREQ == VAL_FREQ - 1:
                 PATH = 'checkpoints/%d_%s.pth' % (total_steps+1, args.name)
                 torch.save(model.state_dict(), PATH)
-
-            #     results = {}
-            #     for val_dataset in args.validation:
-            #         if val_dataset == 'chairs':
-            #             results.update(evaluate.validate_chairs(model.module)[])
-            #         elif val_dataset == 'sintel':
-            #             results.update(evaluate.validate_sintel(model.module))
-            #         elif val_dataset == 'kitti':
-            #             results.update(evaluate.validate_kitti(model.module))
-
-            #     logger.write_dict(results)
-                
-            #     model.train()
-            #     if args.stage != 'chairs':
-            #         model.module.freeze_bn()
+                psnr, ssim = validate_REDS(model, cfg)
+                results = {'PSNR': psnr, 'SSIM': ssim}
+                logger.write_dict(results)
+                model.train()
+            
             
             total_steps += 1
 

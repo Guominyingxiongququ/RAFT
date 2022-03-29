@@ -1,5 +1,7 @@
 *.pyc
 *.egg-info
+*.ipynb
+checkpoints/*
 dist
 datasets
 pytorch_env
