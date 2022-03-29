@@ -211,7 +211,7 @@ def test_big_size(model, input_data, patch_h=64, patch_w=64,
             w_begin = patch_w*(w_index-1)-patch_w_overlap*(w_index-1)
             w_end = patch_w*w_index-patch_w_overlap*(w_index-1)
             test_patch = input_data[:, :, :, h_begin:h_end, w_begin:w_end]
-            output_patch = model(test_patch[:, 0, :, :, :], test_patch[:, 1, :, :, :])[0]
+            output_patch = model(test_patch[:, 0, :, :, :], test_patch[:, 1, :, :, :])[-1]
             output_patch = \
                 output_patch.cpu().detach().numpy().astype(np.float32)
             if w_index == 1:
@@ -229,7 +229,7 @@ def test_big_size(model, input_data, patch_h=64, patch_w=64,
                     output_patch[:, :, :, patch_w_overlap * scale:]
             w_index += 1
         test_patch = input_data[:, :, :, h_begin:h_end, -patch_w:]
-        output_patch = model(test_patch[:, 0, :, :, :], test_patch[:, 1, :, :, :])[0]
+        output_patch = model(test_patch[:, 0, :, :, :], test_patch[:, 1, :, :, :])[-1]
         output_patch = \
             output_patch.cpu().detach().numpy().astype(np.float32)
         output_patch = output_patch[:, :, :, :]
@@ -266,7 +266,7 @@ def test_big_size(model, input_data, patch_h=64, patch_w=64,
         w_begin = patch_w * (w_index-1) - patch_w_overlap * (w_index-1)
         w_end = patch_w * w_index - patch_w_overlap * (w_index-1)
         test_patch = input_data[:, :, :, -patch_h:, w_begin:w_end]
-        output_patch = model(test_patch[:, 0, :, :, :], test_patch[:, 1, :, :, :])[0]
+        output_patch = model(test_patch[:, 0, :, :, :], test_patch[:, 1, :, :, :])[-1]
         output_patch = \
             output_patch.cpu().detach().numpy().astype(np.float32)
         output_patch = output_patch
@@ -285,7 +285,7 @@ def test_big_size(model, input_data, patch_h=64, patch_w=64,
                 output_patch[:, :, :, patch_w_overlap*scale:]
         w_index += 1
     test_patch = input_data[:, :, :,  -patch_h:, -patch_w:]
-    output_patch = model(test_patch[:, 0, :, :, :], test_patch[:, 1, :, :, :])[0]
+    output_patch = model(test_patch[:, 0, :, :, :], test_patch[:, 1, :, :, :])[-1]
     output_patch = output_patch.cpu().detach().numpy().astype(np.float32)
     output_patch = output_patch
     last_range = w_end-(W-patch_w)

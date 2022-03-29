@@ -47,6 +47,8 @@ except:
 MAX_FLOW = 400
 SUM_FREQ = 100
 VAL_FREQ = 5000
+LOG_FREQ = 1000
+LOG_PATH = "/home/xinyuanyu/work/RAFT_result"
 cfg = Config.fromfile("/home/xinyuanyu/work/RAFT/config/raft_reds4.py")
 
 def charbonnier_loss(pred, target, eps=1e-12):
@@ -92,12 +94,13 @@ def fetch_optimizer(args, model):
     
 
 class Logger:
-    def __init__(self, model, scheduler):
+    def __init__(self, model, scheduler, log_dir):
         self.model = model
         self.scheduler = scheduler
         self.total_steps = 0
         self.running_loss = {}
         self.writer = None
+        self.log_dir = log_dir
 
     def _print_training_status(self):
         metrics_data = [self.running_loss[k]/SUM_FREQ for k in sorted(self.running_loss.keys())]
@@ -108,7 +111,7 @@ class Logger:
         print(training_str + metrics_str)
 
         if self.writer is None:
-            self.writer = SummaryWriter("/home/xinyuanyu/work/RAFT_result")
+            self.writer = SummaryWriter(self.log_dir)
 
         for k in self.running_loss:
             self.writer.add_scalar(k, self.running_loss[k]/SUM_FREQ, self.total_steps)
@@ -156,8 +159,10 @@ def train(args):
     optimizer, scheduler = fetch_optimizer(args, model)
 
     total_steps = 0
+    task_name = "experiment_2"
+    full_log_path = os.path.join(LOG_PATH, task_name)
     scaler = GradScaler(enabled=args.mixed_precision)
-    logger = Logger(model, scheduler)
+    logger = Logger(model, scheduler, full_log_path)
 
     VAL_FREQ = 5000
     add_noise = True
@@ -193,7 +198,7 @@ def train(args):
             scaler.update()
             logger.push({'loss':loss})
             # logger.push(metrics)
-            if total_steps % SUM_FREQ == SUM_FREQ - 1:
+            if total_steps % LOG_FREQ == LOG_FREQ - 1:
                 output = [img[0] for img in output_predictions]
                 grid = torchvision.utils.make_grid(output)
                 logger.writer.add_image('prediction_list', grid, total_steps)

@@ -28,7 +28,9 @@ class RAFT(nn.Module):
     def __init__(self, args):
         super(RAFT, self).__init__()
         self.args = args
+        self.iters = 12
         # add number_blocks_reconstruction to args
+        self.setting_2 = True
         if args.small:
             self.hidden_dim = hdim = 96
             self.context_dim = cdim = 64
@@ -61,23 +63,47 @@ class RAFT(nn.Module):
         #     self.update_block = BasicUpdateBlock(self.args, hidden_dim=hdim)
         
         # reconstruction
-        self.conv_first = nn.Conv2d(2 * 3, hdim, 3, 1, 1)
-        self.reconstruction = make_layer(
-            ResidualBlockNoBN,
-            5,
-            mid_channels=hdim)
-        # upsample
-        self.upsample1 = PixelShufflePack(
-            hdim, hdim, 2, upsample_kernel=3)
-        self.upsample2 = PixelShufflePack(
-            hdim, 64, 2, upsample_kernel=3)
-        # we fix the output channels in the last few layers to 64.
-        self.conv_hr = nn.Conv2d(64, 64, 3, 1, 1)
-        self.conv_last = nn.Conv2d(64, 3, 3, 1, 1)
+        # in this case, each iteration has an individual reconstruction module
+        if self.setting_2:
+            self.reconstruct_list = nn.ModuleList()
+            for i in range(self.iters):
+                self.reconstruct_list.append(
+                                        nn.Sequential(
+                                            nn.Conv2d(2 * 3, hdim, 3, 1, 1),  
+                                            make_layer(
+                                                ResidualBlockNoBN,
+                                                5,
+                                                mid_channels=hdim),
+                                            PixelShufflePack(
+                                                hdim, hdim, 2, upsample_kernel=3),
+                                            nn.LeakyReLU(negative_slope=0.1, inplace=True),
+                                            PixelShufflePack(
+                                                hdim, 64, 2, upsample_kernel=3),
+                                            nn.LeakyReLU(negative_slope=0.1, inplace=True),
+                                            nn.Conv2d(64, 64, 3, 1, 1),
+                                            nn.LeakyReLU(negative_slope=0.1, inplace=True),
+                                            nn.Conv2d(64, 3, 3, 1, 1),
+                                        )
+                )
+            
+        else: 
+            self.conv_first = nn.Conv2d(2 * 3, hdim, 3, 1, 1)
+            self.reconstruction = make_layer(
+                ResidualBlockNoBN,
+                5,
+                mid_channels=hdim)
+            # upsample
+            self.upsample1 = PixelShufflePack(
+                hdim, hdim, 2, upsample_kernel=3)
+            self.upsample2 = PixelShufflePack(
+                hdim, 64, 2, upsample_kernel=3)
+            # we fix the output channels in the last few layers to 64.
+            self.conv_hr = nn.Conv2d(64, 64, 3, 1, 1)
+            self.conv_last = nn.Conv2d(64, 3, 3, 1, 1)
+            # activation function
+            self.lrelu = nn.LeakyReLU(negative_slope=0.1, inplace=True)
         self.img_upsample = nn.Upsample(
             scale_factor=4, mode='bilinear', align_corners=False)
-        # activation function
-        self.lrelu = nn.LeakyReLU(negative_slope=0.1, inplace=True)
 
     def freeze_bn(self):
         for m in self.modules():
@@ -145,6 +171,7 @@ class RAFT(nn.Module):
             coords1 = coords1 + flow_init
 
         output_predictions = []
+        base = self.img_upsample(image1)
         for itr in range(iters):
             coords1 = coords1.detach()
             corr = corr_fn(coords1) # index correlation volume
@@ -165,13 +192,15 @@ class RAFT(nn.Module):
             image_warp2 = flow_warp(image2, flow.permute(0, 2, 3, 1))
             # reconstruction
             hr = torch.cat((image1, image_warp2), dim=1)
-            hr = self.conv_first(hr)
-            hr = self.reconstruction(hr)
-            hr = self.lrelu(self.upsample1(hr))
-            hr = self.lrelu(self.upsample2(hr))
-            hr = self.lrelu(self.conv_hr(hr))
-            hr = self.conv_last(hr)
-            base = self.img_upsample(image1)
+            if self.setting_2:
+                hr = self.reconstruct_list[itr](hr)
+            else:
+                hr = self.conv_first(hr)
+                hr = self.reconstruction(hr)
+                hr = self.lrelu(self.upsample1(hr))
+                hr = self.lrelu(self.upsample2(hr))
+                hr = self.lrelu(self.conv_hr(hr))
+                hr = self.conv_last(hr)
             hr += base
             output_predictions.append(hr)
 
