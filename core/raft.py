@@ -30,7 +30,8 @@ class RAFT(nn.Module):
         self.args = args
         self.iters = 12
         # add number_blocks_reconstruction to args
-        self.setting_2 = True
+        self.setting_2 = False
+        self.setting_3 = True
         if args.small:
             self.hidden_dim = hdim = 96
             self.context_dim = cdim = 64
@@ -86,6 +87,17 @@ class RAFT(nn.Module):
                                         )
                 )
             
+        elif self.setting_3:
+            self.conv_first = nn.Conv2d(2 * 3, hdim, 3, 1, 1)
+            self.reconstruction = make_layer(
+                ResidualBlockNoBN,
+                5,
+                mid_channels=hdim)
+            # we fix the output channels in the last few layers to 64.
+            self.conv_hr = nn.Conv2d(hdim, 64, 3, 1, 1)
+            self.conv_last = nn.Conv2d(64, 3, 3, 1, 1)
+            # activation function
+            self.lrelu = nn.LeakyReLU(negative_slope=0.1, inplace=True)
         else: 
             self.conv_first = nn.Conv2d(2 * 3, hdim, 3, 1, 1)
             self.reconstruction = make_layer(
@@ -190,10 +202,21 @@ class RAFT(nn.Module):
             #     flow_up = self.upsample_flow(coords1 - coords0, up_mask)
             flow = coords1 - coords0
             image_warp2 = flow_warp(image2, flow.permute(0, 2, 3, 1))
+            if self.setting_3:
+                image_warp2 = self.img_upsample(image_warp2)
             # reconstruction
-            hr = torch.cat((image1, image_warp2), dim=1)
+            hr = torch.cat((base, image_warp2), dim=1)
+
             if self.setting_2:
                 hr = self.reconstruct_list[itr](hr)
+                hr += base
+            elif self.setting_3:
+                hr = self.conv_first(hr)
+                hr = self.reconstruction(hr)
+                hr = self.lrelu(self.conv_hr(hr))
+                hr = self.conv_last(hr)
+                hr += base
+                base = hr
             else:
                 hr = self.conv_first(hr)
                 hr = self.reconstruction(hr)
@@ -201,7 +224,8 @@ class RAFT(nn.Module):
                 hr = self.lrelu(self.upsample2(hr))
                 hr = self.lrelu(self.conv_hr(hr))
                 hr = self.conv_last(hr)
-            hr += base
+                hr += base
+            
             output_predictions.append(hr)
 
         if test_mode:

@@ -42,7 +42,7 @@ except:
         def update(self):
             pass
 
-
+os.environ["CUDA_VISIBLE_DEVICES"]="3"
 # exclude extremly large displacements
 MAX_FLOW = 400
 SUM_FREQ = 100
@@ -159,7 +159,7 @@ def train(args):
     optimizer, scheduler = fetch_optimizer(args, model)
 
     total_steps = 0
-    task_name = "experiment_2"
+    task_name = "experiment_3"
     full_log_path = os.path.join(LOG_PATH, task_name)
     scaler = GradScaler(enabled=args.mixed_precision)
     logger = Logger(model, scheduler, full_log_path)
@@ -257,7 +257,6 @@ if __name__ == '__main__':
     parser.add_argument('--gamma', type=float, default=0.8, help='exponential weighting')
     parser.add_argument('--add_noise', action='store_true')
     args = parser.parse_args()
-
     torch.manual_seed(1234)
     np.random.seed(1234)
 
