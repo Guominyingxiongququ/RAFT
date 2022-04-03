@@ -54,6 +54,8 @@ class RAFT(nn.Module):
         self.fnet = ResidualBlocksWithInputConv(3, 128, 5)
         self.cnet = ResidualBlocksWithInputConv(3, hdim+cdim, 5)
         self.update_block = BasicUpdateBlock(self.args, hidden_dim=hdim)
+        self.optical_flow_list = []
+        self.warped_img_list = []
         # if args.small:
         #     self.fnet = SmallEncoder(output_dim=128, norm_fn='instance', dropout=args.dropout)        
         #     self.cnet = SmallEncoder(output_dim=hdim+cdim, norm_fn='none', dropout=args.dropout)
@@ -65,12 +67,13 @@ class RAFT(nn.Module):
         
         # reconstruction
         # in this case, each iteration has an individual reconstruction module
+        input_num = 2
         if self.setting_2:
             self.reconstruct_list = nn.ModuleList()
             for i in range(self.iters):
                 self.reconstruct_list.append(
                                         nn.Sequential(
-                                            nn.Conv2d(2 * 3, hdim, 3, 1, 1),  
+                                            nn.Conv2d(input_num * 3, hdim, 3, 1, 1),  
                                             make_layer(
                                                 ResidualBlockNoBN,
                                                 5,
@@ -88,7 +91,7 @@ class RAFT(nn.Module):
                 )
             
         elif self.setting_3:
-            self.conv_first = nn.Conv2d(2 * 3, hdim, 3, 1, 1)
+            self.conv_first = nn.Conv2d(input_num * 3, hdim, 3, 1, 1)
             self.reconstruction = make_layer(
                 ResidualBlockNoBN,
                 5,
@@ -99,7 +102,7 @@ class RAFT(nn.Module):
             # activation function
             self.lrelu = nn.LeakyReLU(negative_slope=0.1, inplace=True)
         else: 
-            self.conv_first = nn.Conv2d(2 * 3, hdim, 3, 1, 1)
+            self.conv_first = nn.Conv2d(input_num * 3, hdim, 3, 1, 1)
             self.reconstruction = make_layer(
                 ResidualBlockNoBN,
                 5,
@@ -145,68 +148,89 @@ class RAFT(nn.Module):
         return up_flow.reshape(N, 2, 8*H, 8*W)
 
 
-    def forward(self, image1, image2, iters=12, flow_init=None, upsample=True, test_mode=False):
+    def forward(self, input_frames, iters=12, flow_init=None, upsample=True, test_mode=False):
         """ Estimate optical flow between pair of frames """
 
         # image1 = 2 * (image1 / 255.0) - 1.0
         # image2 = 2 * (image2 / 255.0) - 1.0
 
-        image1 = image1.contiguous()
-        image2 = image2.contiguous()
-
+        # image1 = image1.contiguous()
+        # image2 = image2.contiguous()
+        self.optical_flow_list = []
+        self.warped_img_list = []
+        input_frames = input_frames.contiguous()
+        n, t, c, h, w = input_frames.shape
+        refer_idx = int((t+1)/2)
         hdim = self.hidden_dim
 
         cdim = self.context_dim
 
         # run the feature network
+        fmap_list =[]
+        corr_fn_dict = {}
+        net_list = []
+        inp_list = []
+        coords0_dict = {}
+        coords1_dict = {}
         with autocast(enabled=self.args.mixed_precision):
-            fmap1 = self.fnet(image1)
-            fmap2 = self.fnet(image2)
-        
-        fmap1 = fmap1.float()
-        fmap2 = fmap2.float()
-        if self.args.alternate_corr:
-            corr_fn = AlternateCorrBlock(fmap1, fmap2, radius=self.args.corr_radius)
-        else:
-            corr_fn = CorrBlock(fmap1, fmap2, radius=self.args.corr_radius)
-
-        # run the context network
-        with autocast(enabled=self.args.mixed_precision):
-            cnet = self.cnet(image1)
-            net, inp = torch.split(cnet, [hdim, cdim], dim=1)
-            net = torch.tanh(net)
-            inp = torch.relu(inp)
-
-        coords0, coords1 = self.initialize_flow(image1)
-
-        if flow_init is not None:
-            coords1 = coords1 + flow_init
-
-        output_predictions = []
-        base = self.img_upsample(image1)
-        for itr in range(iters):
-            coords1 = coords1.detach()
-            corr = corr_fn(coords1) # index correlation volume
-
-            flow = coords1 - coords0
+            for i in range(t):
+                fmap_list.append(self.fnet(input_frames[:, i, :, :, :]).float())
+        for i in range(t):
+            if i!=refer_idx:
+                if self.args.alternate_corr:
+                    corr_fn = AlternateCorrBlock(fmap_list[refer_idx], fmap_list[i], radius=self.args.corr_radius)
+                else:
+                    corr_fn = CorrBlock(fmap_list[refer_idx], fmap_list[i], radius=self.args.corr_radius)
+                corr_fn_dict[i] = corr_fn
+            # run the context network
             with autocast(enabled=self.args.mixed_precision):
-                net, up_mask, delta_flow = self.update_block(net, inp, corr, flow)
-
-            # F(t+1) = F(t) + \Delta(t)
-            coords1 = coords1 + delta_flow
-
-            # upsample predictions
-            # if up_mask is None:
-            #     flow_up = upflow8(coords1 - coords0)
-            # else:
-            #     flow_up = self.upsample_flow(coords1 - coords0, up_mask)
-            flow = coords1 - coords0
-            image_warp2 = flow_warp(image2, flow.permute(0, 2, 3, 1))
-            if self.setting_3:
-                image_warp2 = self.img_upsample(image_warp2)
+                cnet = self.cnet(input_frames[:, i, :, :, :])
+                net, inp = torch.split(cnet, [hdim, cdim], dim=1)
+                net = torch.tanh(net)
+                inp = torch.relu(inp)
+                net_list.append(net)
+                inp_list.append(inp)
+        
+        for i in range(t):
+            if i != refer_idx:
+                coords0, coords1 = self.initialize_flow(input_frames[:, i, :, :, :])
+                coords0_dict[i] = coords0
+                coords1_dict[i] = coords1
+        # if flow_init is not None:
+        #     coords1 = coords1 + flow_init
+        ref_image = input_frames[:, refer_idx, :, :, :]
+        output_predictions = []
+        base = self.img_upsample(ref_image)
+        for itr in range(iters):
+            recon_list = []
+            for i in range(t):
+                if i != refer_idx:
+                    coords1 = coords1_dict[i].detach()
+                    corr = corr_fn_dict[i](coords1)
+                    flow = coords1_dict[i] - coords0_dict[i]
+                    with autocast(enabled=self.args.mixed_precision):
+                        net, up_mask, delta_flow = self.update_block(net_list[i], inp_list[i], corr, flow)
+                    
+                    net_list[i] = net
+                    # F(t+1) = F(t) + \Delta(t)
+                    coords1 = coords1 + delta_flow
+                    coords1_dict[i] = coords1
+                    # upsample predictions
+                    # if up_mask is None:
+                    #     flow_up = upflow8(coords1 - coords0)
+                    # else:
+                    #     flow_up = self.upsample_flow(coords1 - coords0, up_mask)
+                    flow = coords1 - coords0
+                    self.optical_flow_list.append(flow)
+                    image_warp2 = flow_warp(input_frames[:, i, :, :, :], flow.permute(0, 2, 3, 1))
+                    self.warped_img_list.append(image_warp2[0].detach().cpu())
+                    if self.setting_3:
+                        image_warp2 = self.img_upsample(image_warp2)
+                    recon_list.append(image_warp2)                    
+                else:
+                    recon_list.append(base) 
             # reconstruction
-            hr = torch.cat((base, image_warp2), dim=1)
-
+            hr = torch.cat(recon_list, dim=1)
             if self.setting_2:
                 hr = self.reconstruct_list[itr](hr)
                 hr += base

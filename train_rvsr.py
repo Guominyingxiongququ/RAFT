@@ -18,7 +18,7 @@ import torch.nn.functional as F
 import torchvision
 
 from torch.utils.data import DataLoader
-from raft import RAFT
+from rvsr import RVSR
 from utils.flow_viz import flow_to_image
 from evaluate import *
 import datasets
@@ -50,6 +50,7 @@ os.environ["CUDA_VISIBLE_DEVICES"]="3"
 MAX_FLOW = 400
 SUM_FREQ = 100
 VAL_FREQ = 2000
+# VAL_FREQ = 100
 LOG_FREQ = 100
 LOG_PATH = "/home/xinyuanyu/work/RAFT_result"
 cfg = Config.fromfile("/home/xinyuanyu/work/RAFT/config/raft_multi_reds4.py")
@@ -146,7 +147,7 @@ class Logger:
 
 def train(args):
 
-    model = nn.DataParallel(RAFT(args), device_ids=args.gpus)
+    model = nn.DataParallel(RVSR(args,  "/home/xinyuanyu/work/RAFT/models/raft-things.pth"), device_ids=args.gpus)
     print("Parameter Count: %d" % count_parameters(model))
 
     if args.restore_ckpt is not None:
@@ -155,21 +156,23 @@ def train(args):
     model.cuda()
     model.train()
 
-    if args.stage != 'chairs':
-        model.module.freeze_bn()
+    # if args.stage != 'chairs':
+    #     model.module.freeze_bn()
     
     dataset = build_dataset(cfg.data.train)
     optimizer, scheduler = fetch_optimizer(args, model)
 
     total_steps = 0
-    task_name = "experiment_multi"
+    task_name = "experiment_rvsr"
     full_log_path = os.path.join(LOG_PATH, task_name)
     scaler = GradScaler(enabled=args.mixed_precision)
     logger = Logger(model, scheduler, full_log_path)
 
     add_noise = True
     input_num = args.input_frame
+    fix_iter = 50000
     refer_idx = (input_num+1)/2
+    refer_idx = 0
     refer_idx = int(refer_idx)
     should_keep_training = True
     loss_sum = 0
@@ -198,6 +201,11 @@ def train(args):
             input_frames = input_frames[None, ...]
             gt = gt[None, ...]
             gt = gt.cuda()
+
+            if total_steps < fix_iter:
+                for k, v in model.named_parameters():
+                    if 'RAFT' in k:
+                        v.requires_grad_(False)
             output_predictions = model(input_frames, iters=args.iters)
 
             loss= sequence_loss(output_predictions, gt, args.gamma) 

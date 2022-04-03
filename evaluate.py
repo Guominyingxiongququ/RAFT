@@ -73,27 +73,30 @@ def create_kitti_submission(model, iters=24, output_path='kitti_submission'):
 
 
 @torch.no_grad()
-def validate_REDS(model, cfg):
+def validate_REDS(model, input_num, cfg, iter):
     model.eval()
     val_dataset = build_dataset(cfg.data.test)
     PSNR_sum = 0.0
     SSIM_sum = 0.0
+    refer_idx = (input_num+1)/2
+    refer_idx = int(refer_idx)
+    refer_idx = 0
+    output_list = []
     for val_id in range(len(val_dataset)):
         data_blob = val_dataset[val_id]
-        image1 = data_blob['lq'][0]
-        image2 = data_blob['lq'][1]
-        gt = data_blob['gt'][0]
-        image1 = image1[None, ...].cuda()
-        image2 = image2[None, ...].cuda()
-        gt = gt[None, ...].cuda()
-        input_data = torch.stack([image1, image2], dim=1)
-        output = test_big_size(model, input_data)
+        input_frames = data_blob['lq'][:input_num]
+        gt = data_blob['gt'][refer_idx]
+        input_frames = input_frames[None, ...]
+        gt = gt[None, ...]
+        gt = gt.cuda()
+        output = test_big_size(model, input_frames, iter=iter)
+        output_list.append(torch.from_numpy(output[0]))
         gt = gt.detach().cpu().numpy()
         gt = gt[0] *255
         output = output[0] * 255
         PSNR_sum += psnr(gt, output, crop_border=0, input_order='CHW')
         SSIM_sum += ssim(gt, output, crop_border=0, input_order='CHW')
-    return PSNR_sum/len(val_dataset), SSIM_sum/len(val_dataset)
+    return output_list, PSNR_sum/len(val_dataset), SSIM_sum/len(val_dataset)
 
 @torch.no_grad()
 def validate_chairs(model, iters=24):
@@ -190,7 +193,7 @@ def validate_kitti(model, iters=24):
     return {'kitti-epe': epe, 'kitti-f1': f1}
 
 def test_big_size(model, input_data, patch_h=64, patch_w=64,
-                        patch_h_overlap=32, patch_w_overlap=32):
+                        patch_h_overlap=32, patch_w_overlap=32, iter=-1):
     # input_data shape n, t, c, h, w 
     # output shape n, c, h, w
     scale = 4
@@ -211,7 +214,7 @@ def test_big_size(model, input_data, patch_h=64, patch_w=64,
             w_begin = patch_w*(w_index-1)-patch_w_overlap*(w_index-1)
             w_end = patch_w*w_index-patch_w_overlap*(w_index-1)
             test_patch = input_data[:, :, :, h_begin:h_end, w_begin:w_end]
-            output_patch = model(test_patch[:, 0, :, :, :], test_patch[:, 1, :, :, :])[-1]
+            output_patch = model(test_patch)[iter]
             output_patch = \
                 output_patch.cpu().detach().numpy().astype(np.float32)
             if w_index == 1:
@@ -229,7 +232,7 @@ def test_big_size(model, input_data, patch_h=64, patch_w=64,
                     output_patch[:, :, :, patch_w_overlap * scale:]
             w_index += 1
         test_patch = input_data[:, :, :, h_begin:h_end, -patch_w:]
-        output_patch = model(test_patch[:, 0, :, :, :], test_patch[:, 1, :, :, :])[-1]
+        output_patch = model(test_patch)[iter]
         output_patch = \
             output_patch.cpu().detach().numpy().astype(np.float32)
         output_patch = output_patch[:, :, :, :]
@@ -266,7 +269,7 @@ def test_big_size(model, input_data, patch_h=64, patch_w=64,
         w_begin = patch_w * (w_index-1) - patch_w_overlap * (w_index-1)
         w_end = patch_w * w_index - patch_w_overlap * (w_index-1)
         test_patch = input_data[:, :, :, -patch_h:, w_begin:w_end]
-        output_patch = model(test_patch[:, 0, :, :, :], test_patch[:, 1, :, :, :])[-1]
+        output_patch = model(test_patch)[iter]
         output_patch = \
             output_patch.cpu().detach().numpy().astype(np.float32)
         output_patch = output_patch
@@ -285,7 +288,7 @@ def test_big_size(model, input_data, patch_h=64, patch_w=64,
                 output_patch[:, :, :, patch_w_overlap*scale:]
         w_index += 1
     test_patch = input_data[:, :, :,  -patch_h:, -patch_w:]
-    output_patch = model(test_patch[:, 0, :, :, :], test_patch[:, 1, :, :, :])[-1]
+    output_patch = model(test_patch)[iter]
     output_patch = output_patch.cpu().detach().numpy().astype(np.float32)
     output_patch = output_patch
     last_range = w_end-(W-patch_w)
