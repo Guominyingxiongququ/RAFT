@@ -50,7 +50,7 @@ os.environ["CUDA_VISIBLE_DEVICES"]="3"
 MAX_FLOW = 400
 SUM_FREQ = 100
 VAL_FREQ = 2000
-# VAL_FREQ = 100
+VAL_FREQ = 100
 LOG_FREQ = 100
 LOG_PATH = "/home/xinyuanyu/work/RAFT_result"
 cfg = Config.fromfile("/home/xinyuanyu/work/RAFT/config/raft_multi_reds4.py")
@@ -163,7 +163,7 @@ def train(args):
     optimizer, scheduler = fetch_optimizer(args, model)
 
     total_steps = 0
-    task_name = "experiment_rvsr"
+    task_name = "experiment_7"
     full_log_path = os.path.join(LOG_PATH, task_name)
     scaler = GradScaler(enabled=args.mixed_precision)
     logger = Logger(model, scheduler, full_log_path)
@@ -206,6 +206,8 @@ def train(args):
                 for k, v in model.named_parameters():
                     if 'RAFT' in k:
                         v.requires_grad_(False)
+            else:
+                model.requires_grad_(True)
             output_predictions = model(input_frames, iters=args.iters)
 
             loss= sequence_loss(output_predictions, gt, args.gamma) 
