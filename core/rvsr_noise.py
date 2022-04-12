@@ -26,18 +26,17 @@ class RVSR(nn.Module):
         # self.fusion_list = nn.ModuleList()
         # self.reconstruct_list = nn.ModuleList()
         mid_channels = 64
-        self.fusion = ResidualBlocksWithInputConv(mid_channels*3, mid_channels, 10)
+        self.fusion = nn.Sequential(
+                                    nn.Conv2d(128, 64, 3, 1, 1),
+                                    nn.LeakyReLU(negative_slope=0.1, inplace=True),
+                                    nn.Conv2d(64, 64, 3, 1, 1),
+                      )
         self.reconstruct = nn.Sequential(
-                                        PixelShufflePack(mid_channels, mid_channels, 2, upsample_kernel=3),
-                                        nn.LeakyReLU(negative_slope=0.1, inplace=True),
-                                        PixelShufflePack(mid_channels, mid_channels, 2, upsample_kernel=3),
-                                        nn.LeakyReLU(negative_slope=0.1, inplace=True),
                                         nn.Conv2d(64, 64, 3, 1, 1),
                                         nn.LeakyReLU(negative_slope=0.1, inplace=True),
                                         nn.Conv2d(64, 3, 3, 1, 1),
                                         )
         num_blocks = 30
-        self.conv_h = nn.Conv2d(64, 64, 3, 1, 1)
         self.feature_extractor = ResidualBlocksWithInputConv(3, mid_channels, num_blocks)
         self.img_upsample = nn.Upsample(
             scale_factor=4, mode='bilinear', align_corners=False)
@@ -68,32 +67,31 @@ class RVSR(nn.Module):
         pass
 
     def forward(self, input_frames, iters=12, flow_init=None, upsample=True, test_mode=False):
-        input_frames = (input_frames*2) - 1.0 
+        input_frames = (input_frames*2) - 1.0
         image1 = input_frames[:, 0, :, :, :]
         image2 = input_frames[:, 1, :, :, :]
         image1_up = self.img_upsample_input(image1)
         image2_up = self.img_upsample_input(image2)
         flow_output_list = self.RAFT(image1_up, image2_up, iters=iters, flow_init=flow_init, upsample=upsample, test_mode=test_mode)
         output_predictions = []
-        base = self.img_upsample(image1)
+        base = image1
         base = (base+1.0)/2
         # achieve feature map for image1 and image2
         fmap1 = self.feature_extractor(image1)
         fmap2 = self.feature_extractor(image2)
         self.optical_flow_list = []
         self.warped_img_list = []
-        merged_fmap = fmap1.new_zeros(fmap1.shape)
+        merged_fmap = fmap1
         for itr in range(iters):
             self.optical_flow_list.append(flow_output_list[itr])
             image_warp2 = flow_warp(image2, flow_output_list[itr].permute(0, 2, 3, 1))
             self.warped_img_list.append((image_warp2[0].detach().cpu() + 1.0)/2)
             fmap_warp2 = flow_warp(fmap2, flow_output_list[itr].permute(0, 2, 3, 1))
             # reconstruction
-            hr = torch.cat([fmap1, merged_fmap, fmap_warp2], dim=1)
+            hr = torch.cat([merged_fmap, fmap_warp2], dim=1)
             # hr = self.fusion_list[itr](hr)
             hr = self.fusion(hr)
-            merged_fmap = hr
-            merged_fmap = F.relu(self.conv_h(merged_fmap))
+            merged_fmap = hr + merged_fmap
             hr = self.reconstruct(merged_fmap)
             # hr = self.reconstruct_list[itr](merged_fmap)
             hr += base

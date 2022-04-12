@@ -71,6 +71,32 @@ def create_kitti_submission(model, iters=24, output_path='kitti_submission'):
         output_filename = os.path.join(output_path, frame_id)
         frame_utils.writeFlowKITTI(output_filename, flow)
 
+@torch.no_grad()
+def validate_multi_REDS(model, input_num, cfg, iter):
+    model.eval()
+    val_dataset = build_dataset(cfg.data.test)
+    PSNR_sum = 0.0
+    SSIM_sum = 0.0
+    output_list = []
+    denoise = True
+    for val_id in range(len(val_dataset)):
+        data_blob = val_dataset[val_id]
+        input_frames = data_blob['lq'][:input_num]
+        gt = data_blob['gt'][:input_num]
+        input_frames = input_frames[None, ...]
+        gt = gt[None, ...]
+        gt = gt.cuda()
+        output = test_big_size_multi(model, input_frames, iter=iter)
+        output = np.clip(output, 0.0, 1.0)
+        output_list.append(torch.from_numpy(output[0, 7, ...]))
+        gt = gt.detach().cpu().numpy()
+        for i in range(11):
+            gt_img = gt[0, i, ...] *255
+            output_img = output[0, i, ...] * 255
+            PSNR_sum += psnr(gt_img, output_img, crop_border=0, input_order='CHW')
+            SSIM_sum += ssim(gt_img, output_img, crop_border=0, input_order='CHW')
+    return output_list, PSNR_sum/(len(val_dataset)*11), SSIM_sum/(len(val_dataset)*11)
+
 
 @torch.no_grad()
 def validate_REDS(model, input_num, cfg, iter):
@@ -82,10 +108,16 @@ def validate_REDS(model, input_num, cfg, iter):
     refer_idx = int(refer_idx)
     refer_idx = 0
     output_list = []
+    denoise = True
     for val_id in range(len(val_dataset)):
+        # print("val id: ")
+        # print(val_id)
         data_blob = val_dataset[val_id]
         input_frames = data_blob['lq'][:input_num]
-        gt = data_blob['gt'][refer_idx]
+        if denoise:
+            gt = data_blob['gt']
+        else:
+            gt = data_blob['gt'][refer_idx]
         input_frames = input_frames[None, ...]
         gt = gt[None, ...]
         gt = gt.cuda()
@@ -94,8 +126,8 @@ def validate_REDS(model, input_num, cfg, iter):
         gt = gt.detach().cpu().numpy()
         gt = gt[0] *255
         output = output[0] * 255
-        PSNR_sum += psnr(gt, output, crop_border=0, input_order='CHW')
-        SSIM_sum += ssim(gt, output, crop_border=0, input_order='CHW')
+        PSNR_sum += psnr(gt[0], output, crop_border=0, input_order='CHW')
+        SSIM_sum += ssim(gt[0], output, crop_border=0, input_order='CHW')
     return output_list, PSNR_sum/len(val_dataset), SSIM_sum/len(val_dataset)
 
 @torch.no_grad()
@@ -197,6 +229,14 @@ def test_big_size(model, input_data, patch_h=64, patch_w=64,
     # input_data shape n, t, c, h, w 
     # output shape n, c, h, w
     scale = 4
+    denoise = False
+    if denoise:
+        patch_h = 128
+        patch_w = 128
+        patch_h_overlap = 64
+        patch_w_overlap = 64
+        scale = 1
+
     H = input_data.shape[3]
     W = input_data.shape[4]
     t = input_data.shape[1]
@@ -312,6 +352,126 @@ def test_big_size(model, input_data, patch_h=64, patch_w=64,
             term1*rate1+term2*rate2
     cur_result = test_horizontal_result[:, :, last_last_range*scale:, :]
     test_result[:, :, h_end*scale:, :] = cur_result
+    return test_result
+
+def test_big_size_multi(model, input_data, patch_h=64, patch_w=64,
+                        patch_h_overlap=32, patch_w_overlap=32, iter=-1):
+    # input_data shape n, t, c, h, w 
+    # output shape n, t, c, h, w
+    scale = 4
+    n, t, c, H, W = input_data.shape
+    test_result = np.zeros((n, t, c, scale*H, scale*W))
+    h_index = 1
+    while (patch_h*h_index-patch_h_overlap*(h_index-1)) < H:
+        test_horizontal_result = np.zeros((n, t, 3, scale*patch_h, scale*W))
+        h_begin = patch_h*(h_index-1)-patch_h_overlap*(h_index-1)
+        h_end = patch_h*h_index-patch_h_overlap*(h_index-1)
+        w_index = 1
+        w_end = 0
+        while (patch_w*w_index-patch_w_overlap*(w_index-1)) < W:
+            w_begin = patch_w*(w_index-1)-patch_w_overlap*(w_index-1)
+            w_end = patch_w*w_index-patch_w_overlap*(w_index-1)
+            test_patch = input_data[:, :, :, h_begin:h_end, w_begin:w_end]
+            output_patch = model(test_patch)[iter]
+            output_patch = \
+                [output.cpu().detach().numpy().astype(np.float32) for output in output_patch]
+            output_patch = np.stack(output_patch, axis=1)
+            if w_index == 1:
+                test_horizontal_result[:, :, :, :, w_begin*scale:w_end*scale] = \
+                    output_patch
+            else:
+                for i in range(patch_w_overlap*scale):
+                    test_horizontal_result[:, :, :, :, w_begin * scale + i] = \
+                        test_horizontal_result[:, :, :, :, w_begin * scale + i]\
+                        * (patch_w_overlap * scale-1-i)/(patch_w_overlap * scale -1)\
+                        + output_patch[:, :, :, :, i] * i/(patch_w_overlap * scale -1)
+                cur_begin = w_begin+patch_w_overlap
+                cur_begin = cur_begin*scale
+                test_horizontal_result[:, :, :, :, cur_begin:w_end*scale] = \
+                    output_patch[:, :, :, :, patch_w_overlap * scale:]
+            w_index += 1
+        test_patch = input_data[:, :, :, h_begin:h_end, -patch_w:]
+        output_patch = model(test_patch)[iter]
+        output_patch = \
+            [output.cpu().detach().numpy().astype(np.float32) for output in output_patch]
+        output_patch = np.stack(output_patch, axis=1)
+        last_range = w_end-(W-patch_w)
+        last_range = last_range * scale
+
+        for i in range(last_range):
+            term1 = test_horizontal_result[:, :, :, :, W*scale-patch_w*scale+i]
+            rate1 = (last_range-1-i)/(last_range-1)
+            term2 = output_patch[:, :, :, :, i]
+            rate2 = i/(last_range-1)
+            test_horizontal_result[:, :, :, :, W*scale-patch_w*scale+i] = \
+                term1*rate1+term2*rate2
+        test_horizontal_result[:, :, :, :, w_end*scale:] = \
+            output_patch[:, :, :, :, last_range:]
+
+        if h_index == 1:
+            test_result[:, :, :, h_begin*scale:h_end*scale, :] = test_horizontal_result
+        else:
+            for i in range(patch_h_overlap*scale):
+                term1 = test_result[:, :, :, h_begin*scale+i, :]
+                rate1 = (patch_h_overlap*scale-1-i)/(patch_h_overlap*scale-1)
+                term2 = test_horizontal_result[:, :, :, i, :]
+                rate2 = i/(patch_h_overlap*scale-1)
+                test_result[:, :, :, h_begin*scale+i, :] = \
+                    term1 * rate1 + term2 * rate2
+            test_result[:, :, :, h_begin*scale+patch_h_overlap*scale:h_end*scale, :] = \
+                test_horizontal_result[:, :, :, patch_h_overlap*scale:, :]
+        h_index += 1
+
+    test_horizontal_result = np.zeros((n, t, 3, patch_h*scale, W*scale))
+    w_index = 1
+    while (patch_w * w_index - patch_w_overlap * (w_index-1)) < W:
+        w_begin = patch_w * (w_index-1) - patch_w_overlap * (w_index-1)
+        w_end = patch_w * w_index - patch_w_overlap * (w_index-1)
+        test_patch = input_data[:, :, :, -patch_h:, w_begin:w_end]
+        output_patch = model(test_patch)[iter]
+        output_patch = \
+            [output.cpu().detach().numpy().astype(np.float32) for output in output_patch]
+        output_patch = np.stack(output_patch, axis=1)
+        if w_index == 1:
+            test_horizontal_result[:, :, :, :, w_begin*scale:w_end*scale] = output_patch
+        else:
+            for i in range(patch_w_overlap*scale):
+                term1 = test_horizontal_result[:, :, :, :, w_begin*scale+i]
+                rate1 = (patch_w_overlap*scale-1-i)/(patch_w_overlap*scale-1)
+                term2 = output_patch[:, :, :, :, i]
+                rate2 = i/(patch_w_overlap*scale-1)
+                test_horizontal_result[:, :, :, :, w_begin*scale+i] = \
+                    term1*rate1+term2*rate2
+            cur_begin = w_begin+patch_w_overlap
+            test_horizontal_result[:, :, :, :, cur_begin*scale:w_end*scale] = \
+                output_patch[:, :, :, :, patch_w_overlap*scale:]
+        w_index += 1
+    test_patch = input_data[:, :, :,  -patch_h:, -patch_w:]
+    output_patch = model(test_patch)[iter]
+    output_patch = \
+        [output.cpu().detach().numpy().astype(np.float32) for output in output_patch]
+    output_patch = np.stack(output_patch, axis=1)
+    last_range = w_end-(W-patch_w)
+    for i in range(last_range*scale):
+        term1 = test_horizontal_result[:, :, :, :, W*scale-patch_w*scale+i]
+        rate1 = (last_range*scale-1-i)/(last_range*scale-1)
+        term2 = output_patch[:, :, :, :, i]
+        rate2 = i/(last_range*scale-1)
+        test_horizontal_result[:, :, :, :, W*scale-patch_w*scale+i] = \
+            term1*rate1+term2*rate2
+    test_horizontal_result[:, :, :, :, w_end*scale:] = \
+        output_patch[:, :, :, :, last_range*scale:]
+
+    last_last_range = h_end-(H-patch_h)
+    for i in range(last_last_range*scale):
+        term1 = test_result[:, :, :, H*scale-patch_w*scale+i, :]
+        rate1 = (last_last_range*scale-1-i)/(last_last_range*scale-1)
+        term2 = test_horizontal_result[:, :, :, i, :]
+        rate2 = i/(last_last_range*scale-1)
+        test_result[:, :, :, H*scale-patch_w*scale+i, :] = \
+            term1*rate1+term2*rate2
+    cur_result = test_horizontal_result[:, :, :, last_last_range*scale:, :]
+    test_result[:, :, :, h_end*scale:, :] = cur_result
     return test_result
 
 

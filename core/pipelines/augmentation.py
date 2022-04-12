@@ -986,8 +986,10 @@ class GenerateDNTestFrameIndices:
             lq_frame = osp.join(lq_path_root, clip_name, iso_name,
                                 f'frame{v}_noisy{noisy_idx}.png')
             lq_path.append(lq_frame)
-
-        gt_frame_name = f'frame{center_frame_idx}_clean_and_slightly_denoised'
+        begin_idx = center_frame_idx - num_half_frames * interval
+        if begin_idx<1:
+            begin_idx=1
+        gt_frame_name = f'frame{begin_idx}_clean_and_slightly_denoised'
         with open("/home/xinyuanyu/log.txt", "a+") as log_writer:
             log_writer.write(gt_frame_name + " " + lq_frame)
         gt_path = [osp.join(gt_path_root, clip_name, iso_name,
@@ -1146,8 +1148,13 @@ class GenerateDNFrameIndices:
                 lq_frame = osp.join(lq_path_root, clip_name, iso_name,
                                     f'frame{v}_noisy{rand_int}.png')
                 lq_path.append(lq_frame)
-
-            gt_frame_name = f'frame{center_frame_idx}_clean_and_slightly_denoised'
+            
+            # center_frame_idx - num_half_frames * interval
+            # gt_frame_name = f'frame{center_frame_idx}_clean_and_slightly_denoised'
+            begin_idx = center_frame_idx - num_half_frames * interval
+            if begin_idx<1:
+                begin_idx=1
+            gt_frame_name = f'frame{begin_idx}_clean_and_slightly_denoised'
             gt_path = [osp.join(gt_path_root, clip_name, iso_name,
                     f'{gt_frame_name}.png')]
         else:

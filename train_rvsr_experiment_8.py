@@ -51,8 +51,8 @@ MAX_FLOW = 400
 SUM_FREQ = 100
 VAL_FREQ = 2000
 LOG_FREQ = 500
-LOG_PATH = "/home/xinyuanyu/work/RAFT_result"
-cfg = Config.fromfile("/home/xinyuanyu/work/RAFT/config/raft_multi_reds4_update.py")
+LOG_PATH = "/home1/xinyuan/work/RAFT_result"
+cfg = Config.fromfile("/home1/xinyuan/work/RAFT/config/raft_multi_reds4_update.py")
 
 def charbonnier_loss(pred, target, eps=1e-12):
     """Charbonnier loss.
@@ -76,7 +76,7 @@ def sequence_loss(pred_imgs, gt_img, gamma=0.8):
     
     for i in range(n_predictions):
         i_weight = gamma**(n_predictions - i - 1)
-        for j in range(11):
+        for j in range(15):
             if pred_imgs[i][j] is not None:
                 i_loss = charbonnier_loss(pred_imgs[i][j], gt_img[:, j, :, :, :])
                 total_loss += i_weight * (i_loss).mean()
@@ -148,7 +148,7 @@ class Logger:
 
 def train(args):
 
-    model = nn.DataParallel(RVSR(args,  "/home/xinyuanyu/work/RAFT/models/raft-things.pth"), device_ids=args.gpus)
+    model = nn.DataParallel(RVSR(args,  "/home1/xinyuan/work/RAFT/models/raft-things.pth"), device_ids=args.gpus)
     print("Parameter Count: %d" % count_parameters(model))
 
     if args.restore_ckpt is not None:
@@ -164,15 +164,15 @@ def train(args):
     optimizer, scheduler = fetch_optimizer(args, model)
 
     total_steps = 0
-    task_name = "experiment_13"
+    task_name = "experiment_8"
     full_log_path = os.path.join(LOG_PATH, task_name)
     scaler = GradScaler(enabled=args.mixed_precision)
     logger = Logger(model, scheduler, full_log_path)
 
     add_noise = True
     input_num = args.input_frame
-    input_num = 11 
-    fix_iter = 20000
+    input_num = 15
+    fix_iter = 50000
     # refer_idx = (input_num+1)/2
     # refer_idx = 0
     # refer_idx = int(refer_idx)
@@ -217,24 +217,24 @@ def train(args):
                 output = []
                 _, c, h, w = output_predictions[0][1].size()
                 for i in range(25):
-                    for j in range(11):
+                    for j in range(15):
                         if output_predictions[i][j] is None:
                             output.append(output_predictions[0][1].new_zeros(c, h, w))
                         else:
                             output.append(torch.clamp(output_predictions[i][j][0], 0.0, 1.0))
-                grid = torchvision.utils.make_grid(output, nrow=11)
+                grid = torchvision.utils.make_grid(output, nrow=15)
                 logger.writer.add_image('prediction_list', grid, total_steps)
                 image_list = []
                 for i in range(input_num):
                     image_list.append(input_frames[0, i, :, :, :])
                 grid = torchvision.utils.make_grid(image_list)
                 logger.writer.add_image('input', grid, total_steps)
-                error_first = abs(output_predictions[0][5][0]-gt[0, 5, :, :, :])
-                error_last = abs(output_predictions[-1][5][0]-gt[0, 5, :, :, :])
+                error_first = abs(output_predictions[0][7][0]-gt[0, 7, :, :, :])
+                error_last = abs(output_predictions[-1][7][0]-gt[0, 7, :, :, :])
                 max_val = torch.max(error_first)
                 error_first = error_first/max_val
                 error_last = error_last/max_val
-                grid = torchvision.utils.make_grid([gt[0, 5, :, :, :], error_first, error_last])
+                grid = torchvision.utils.make_grid([gt[0, 7, :, :, :], error_first, error_last])
                 logger.writer.add_image('error', grid, total_steps)
 
             if total_steps % VAL_FREQ == VAL_FREQ - 1:
